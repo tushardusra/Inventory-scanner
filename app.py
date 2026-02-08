@@ -6,87 +6,83 @@ import os
 import numpy as np
 import re
 
-# Set Page Config
-st.set_page_config(page_title="Inventory Scanner", layout="centered")
+# Page Config
+st.set_page_config(page_title="TPEML Scanner", layout="centered")
 
-# Initialize OCR with 'en' (English)
+# 1. Load Reader (English)
 @st.cache_resource
 def load_reader():
-    return easyocr.Reader(['en']) 
+    return easyocr.Reader(['en'])
 reader = load_reader()
 
-st.title("📦 Inventory Tag Pro")
+st.title("🏭 TPEML Tag Scanner")
 
-# 1. Restore Upload and Camera with REAR CAMERA default
-mode = st.radio("Input Method:", ["📷 Camera", "📁 Upload"], horizontal=True)
+# 2. Camera Setup (Request Rear Camera)
+# We use a unique key to try and force a fresh camera instance
+img_file = st.camera_input("Scan Tag (Landscape Mode Recommended)", key="rear_cam")
 
-img_file = None
-if mode == "📷 Camera":
-    # 'environment' forces the back camera on mobile phones
-    img_file = st.camera_input("Scan Tag", label_visibility="collapsed")
-else:
-    img_file = st.file_uploader("Upload Tag Image", type=['jpg', 'png', 'jpeg'])
-
+# 3. Processing
 if img_file:
+    # Open & Rotate
     img = Image.open(img_file)
     img = ImageOps.exif_transpose(img) 
-    st.image(img, caption="Scanned Tag", use_container_width=True)
+    st.image(img, caption="Captured Image", use_container_width=True)
     
-    with st.spinner('🔍 Analyzing Handwriting...'):
+    with st.spinner('⏳ Decoding Handwritten Grid...'):
         img_array = np.array(img)
-        # We get the full results to search inside them
+        # We read as a paragraph to try and group the grid numbers
         raw_text_list = reader.readtext(img_array, detail=0)
-        full_blob = " ".join(raw_text_list).upper()
-
-    # 2. Advanced Search Function (Fuzzy Matching)
-    def find_value(keywords, blob, all_text):
-        # Try to find the keyword in the blob and extract the following digits/chars
-        for kw in keywords:
-            # Matches keyword + any symbols + the actual data
-            pattern = rf"{kw}.*?([\w\d/-]+)"
-            match = re.search(pattern, blob)
-            if match:
-                return match.group(1)
+        # Join into one big search block
+        full_text = " ".join(raw_text_list)
         
-        # Fallback: if keywords fail, just show the first few things found
-        return ""
+        # Debug: Print what AI actually sees to the console
+        print(f"DEBUG RAW: {full_text}")
 
-    st.subheader("📝 Verify Details")
+    # 4. "Smart Fix" Logic for your Specific Tag
+    def smart_parse(text):
+        data = {}
+        
+        # A. BOOK NO: Look for 4 digits (e.g., 1940)
+        # The AI often sees "Bonk Ho" or "Book No" followed by 4 digits
+        book_match = re.search(r'(?:Book|Bonk|Bk).*?(\d{4})', text, re.IGNORECASE)
+        data['Book'] = book_match.group(1) if book_match else ""
+        
+        # B. TAG SR NO: Look for 5 digits (e.g., 48490)
+        # It usually appears after "Tag" or "SNo"
+        tag_match = re.search(r'(?:Tag|SNo).*?(\d{5})', text, re.IGNORECASE)
+        data['Tag'] = tag_match.group(1) if tag_match else ""
+
+        # C. QUANTITY: Look for a 1-3 digit number (e.g., 30) 
+        # often floating near "Quantity" or "Qty"
+        qty_match = re.search(r'(?:Quantity|Qty)\D*(\d{1,4})', text, re.IGNORECASE)
+        data['Qty'] = qty_match.group(1) if qty_match else ""
+
+        # D. LOCATION: Look for "WIP" or "UBC"
+        loc_match = re.search(r'(WIP.*?UBC|WIP\s*-\s*\w+)', text, re.IGNORECASE)
+        # Fallback: if it reads "WTP" instead of "WIP"
+        if not loc_match:
+             loc_match = re.search(r'(WTP.*?UB)', text, re.IGNORECASE)
+        data['Loc'] = loc_match.group(1).replace("WTP", "WIP") if loc_match else ""
+
+        # E. MATERIAL NO: The Hardest Part (Grid)
+        # We look for a long sequence of digits/chars. 
+        # If the grid lines break it, we might need manual entry.
+        # This regex looks for 10+ characters that are uppercase or digits
+        mat_match = re.search(r'([A-Z0-9]{10,15})', text)
+        data['Mat'] = mat_match.group(1) if mat_match else ""
+        
+        return data
+
+    extracted = smart_parse(full_text)
+
+    # 5. Form Display
+    st.subheader("📝 Verify & Save")
     
-    # 3. Extraction based on your specific Tag Labels
-    # We look for partial matches to handle messy handwriting/OCR
-    b_no = st.text_input("Book No", find_value(["BOOK", "BK"], full_blob, raw_text_list))
-    t_no = st.text_input("Tag Sr No", find_value(["SR NO", "TAG", "SRNO"], full_blob, raw_text_list))
-    m_no = st.text_input("Material No", find_value(["MATERIAL", "MAT", "MATL"], full_blob, raw_text_list))
-    qty  = st.text_input("Quantity", find_value(["QTY", "QUANTITY", "QNTY"], full_blob, raw_text_list))
-    loc  = st.text_input("Mat. Location", find_value(["LOCATION", "LOC", "MAT LOC"], full_blob, raw_text_list))
-
-    # 4. Save to Excel
-    if st.button("💾 SAVE DATA TO EXCEL"):
-        new_row = {
-            "Book No": b_no, 
-            "Tag Sr No": t_no, 
-            "Material No": m_no, 
-            "Quantity": qty, 
-            "Location": loc
-        }
-        df = pd.DataFrame([new_row])
-        
-        filename = "inventory_count.xlsx"
-        if os.path.exists(filename):
-            old_df = pd.read_excel(filename)
-            df = pd.concat([old_df, df], ignore_index=True)
-        
-        df.to_excel(filename, index=False)
-        st.success(f"Tag {t_no} saved successfully!")
-        st.balloons()
-
-# Sidebar Download
-if os.path.exists("inventory_count.xlsx"):
-    st.sidebar.divider()
-    with open("inventory_count.xlsx", "rb") as f:
-        st.sidebar.download_button("📥 Download Final Excel", f, file_name="Physical_Inventory.xlsx")
-    if st.sidebar.button("🗑️ Clear Local File"):
-        os.remove("inventory_count.xlsx")
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        # We prioritize the extracted data, but leave it editable
+        b_val = st.text_input("Book No (4 Digits)", extracted['Book'])
+        t_val = st.text_input("Tag Sr No (5 Digits)", extracted['Tag'])
+    with col2:
+        q_val = st.text_input("Quantity", extracted['Qty'])
         
