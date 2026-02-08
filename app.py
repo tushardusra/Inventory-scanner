@@ -4,110 +4,79 @@ from PIL import Image, ImageOps
 import pandas as pd
 import os
 import re
+import numpy as np
 
-# 1. Page Configuration
-st.set_page_config(page_title="Pro Inventory Scanner", layout="centered")
-
-# 2. CSS for the Green "Horizontal" Border & Camera UI
+# 1. CSS for a Visual Scanning Box (Overlay)
 st.markdown("""
     <style>
-    /* Creates a green scanning guide over the camera */
-    .viewport-guide {
-        border: 4px dashed #00FF00;
-        border-radius: 15px;
-        position: absolute;
-        top: 10%;
-        left: 5%;
-        right: 5%;
-        bottom: 10%;
-        z-index: 99;
+    .scanner-box {
+        border: 5px solid #00FF00;
+        position: relative;
+        width: 100%;
+        height: 250px;
+        margin-bottom: -250px;
+        z-index: 10;
         pointer-events: none;
-        display: flex;
-        align-items: center;
-        justify-content: center;
     }
-    .viewport-guide::after {
-        content: "PLACE TAG HORIZONTALLY HERE";
-        color: #00FF00;
-        font-weight: bold;
-        font-size: 14px;
-        background: rgba(0,0,0,0.4);
-        padding: 5px;
-    }
-    /* Style the buttons */
-    .stButton>button { width: 100%; border-radius: 20px; height: 3em; background-color: #00FF00; color: black; font-weight: bold; }
     </style>
+    <div class="scanner-box"></div>
 """, unsafe_allow_html=True)
 
-# 3. Load OCR Model
 @st.cache_resource
 def load_reader():
     return easyocr.Reader(['en'])
 reader = load_reader()
 
-st.title("📦 Inventory Pro Scanner")
+st.title("📦 Inventory Tag Scanner")
+st.write("Hold tag vertically; AI will rotate it automatically.")
 
-# 4. Mode Selection: Camera or Upload
-mode = st.radio("Select Input Method:", ["📷 Live Camera", "📁 Upload Image"], horizontal=True)
+img_file = st.camera_input("Capture Tag")
 
-img_file = None
-if mode == "📷 Live Camera":
-    st.info("💡 Turn phone sideways (Landscape) for best results!")
-    # Show the guide
-    st.markdown('<div class="viewport-guide"></div>', unsafe_allow_html=True)
-    img_file = st.camera_input("Scanner")
-else:
-    img_file = st.file_uploader("Upload Tag Photo", type=['jpg', 'png', 'jpeg'])
-
-# 5. Processing Logic
 if img_file:
-    # Open image and fix orientation (Auto-rotate if phone was tilted)
+    # Open and prepare image
     img = Image.open(img_file)
-    img = ImageOps.exif_transpose(img) 
     
-    st.image(img, caption="Processing...", use_container_width=True)
+    # ACTION: Rotate the portrait image to horizontal for the AI
+    img = img.rotate(-90, expand=True) 
+    st.image(img, caption="AI Viewing Angle (Rotated)", use_container_width=True)
     
-    with st.spinner('🔍 AI Reading Handwriting...'):
-        results = reader.readtext(img_file.getvalue(), detail=0)
-        full_text = " ".join(results)
+    with st.spinner('🔍 Deep Scanning...'):
+        # Convert to array for EasyOCR
+        img_array = np.array(img)
+        results = reader.readtext(img_array, detail=0)
+        full_text = " ".join(results).upper() # Convert to uppercase for easier matching
 
-    # Smart Search Patterns (Regex)
-    def find(pattern, text):
-        match = re.search(pattern, text, re.IGNORECASE)
-        return match.group(1).strip() if match else ""
+    # 2. Advanced Extraction (Looking for your specific Tag labels)
+    def extract(keywords, text):
+        for word in keywords:
+            # Look for the keyword and the first number/code following it
+            pattern = rf"{word}.*?([\w\d/-]+)"
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return ""
 
-    st.divider()
-    st.subheader("📝 Verify & Correct")
+    st.subheader("📝 Verification")
     
-    # Columns for easier editing on mobile
-    col1, col2 = st.columns(2)
-    with col1:
-        book_no = st.text_input("Book No", find(r"Book\s*No[:\.]?\s*(\d+)", full_text))
-        tag_no = st.text_input("Tag No", find(r"Tag\s*No[:\.]?\s*(\d+)", full_text))
-    with col2:
-        qty = st.text_input("Quantity", find(r"Qty[:\.]?\s*(\d+)", full_text))
-        part_no = st.text_input("Material No", find(r"Material\s*No[:\.]?\s*([A-Z0-9-]+)", full_text))
-    
-    location = st.text_input("Location", find(r"Loc[:\.]?\s*([\w\d-]+)", full_text))
+    # Searching for your specific tag fields
+    tag_book = st.text_input("Book No", extract(["BOOK NO", "BOOK"], full_text))
+    tag_sr = st.text_input("Tag Sr No", extract(["SR NO", "TAG SR"], full_text))
+    part_no = st.text_input("Material No", extract(["MATERIAL NO", "MAT NO"], full_text))
+    qty = st.text_input("Quantity", extract(["QUANTITY", "QTY"], full_text))
+    loc = st.text_input("Location", extract(["LOCATION", "LOC"], full_text))
 
-    if st.button("💾 SAVE TAG DATA"):
-        # Save logic (local Excel for now)
-        new_row = {"Book": book_no, "Tag": tag_no, "Part": part_no, "Qty": qty, "Location": location}
-        df = pd.DataFrame([new_row])
+    if st.button("💾 SAVE TO EXCEL"):
+        new_data = {"Book": tag_book, "Tag": tag_sr, "Part": part_no, "Qty": qty, "Location": loc}
+        df = pd.DataFrame([new_data])
         
-        filename = "inventory.xlsx"
-        if os.path.exists(filename):
-            old_df = pd.read_excel(filename)
+        if os.path.exists("inventory.xlsx"):
+            old_df = pd.read_excel("inventory.xlsx")
             df = pd.concat([old_df, df], ignore_index=True)
         
-        df.to_excel(filename, index=False)
-        st.success(f"Success! Tag #{tag_no} saved.")
-        st.balloons()
+        df.to_excel("inventory.xlsx", index=False)
+        st.success("Saved!")
 
-# 6. Persistent Download Link
 if os.path.exists("inventory.xlsx"):
-    st.sidebar.markdown("---")
     with open("inventory.xlsx", "rb") as f:
-        st.sidebar.download_button("📥 Download Excel Report", f, file_name="Inventory_Scan_Results.xlsx")
-
-
+        st.sidebar.download_button("📥 Download Report", f, file_name="Inventory.xlsx")
+        
