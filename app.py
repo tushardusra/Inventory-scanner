@@ -4,71 +4,78 @@ from PIL import Image, ImageOps
 import pandas as pd
 import os
 import numpy as np
+import re
 
-# 1. Setup OCR
+# Setup OCR
 @st.cache_resource
 def load_reader():
-    # Adding 'hi' (Hindi) can sometimes help with number recognition in India
     return easyocr.Reader(['en']) 
-
 reader = load_reader()
 
 st.title("📦 Inventory Tag Scanner")
 
-# 2. Camera Input
-img_file = st.camera_input("Take a photo of the Tag")
+# 1. Restore Input Options
+mode = st.radio("Choose Input:", ["📷 Camera", "📁 Upload Image"], horizontal=True)
+
+if mode == "📷 Camera":
+    img_file = st.camera_input("Scan Tag")
+else:
+    img_file = st.file_uploader("Upload Tag Image", type=['jpg', 'png', 'jpeg'])
 
 if img_file:
     img = Image.open(img_file)
-    # Fix orientation
-    img = ImageOps.exif_transpose(img)
-    st.image(img, caption="Uploaded Image", use_container_width=True)
+    img = ImageOps.exif_transpose(img) # Keeps image right-side up
+    st.image(img, caption="Current Tag", width=400)
     
-    with st.spinner('Reading all text...'):
-        # Get raw results
+    with st.spinner('🔍 Extracting Details...'):
         img_array = np.array(img)
-        raw_results = reader.readtext(img_array, detail=0)
-        
-    st.subheader("🔍 Scanned Text (Raw)")
-    if not raw_results:
-        st.error("AI couldn't see any text. Try moving closer or improving light.")
-    else:
-        # This shows you EXACTLY what the AI found so we can debug
-        st.write("The AI found these pieces of text:", raw_results)
-        
-        st.divider()
-        st.subheader("📝 Manual Entry (Correction)")
-        
-        # We will try to guess, but leave them editable
-        # If the list is too short, we provide empty strings to avoid errors
-        def get_val(index):
-            return raw_results[index] if index < len(raw_results) else ""
+        # detail=0 returns just the strings
+        raw_text = reader.readtext(img_array, detail=0)
+        # Combine everything into one string for searching
+        full_blob = " ".join(raw_text).upper()
 
-        # Create the input boxes
-        col1, col2 = st.columns(2)
-        with col1:
-            book_no = st.text_input("Book No", get_val(0))
-            tag_no = st.text_input("Tag No", get_val(1))
-        with col2:
-            part_no = st.text_input("Material No", get_val(2))
-            qty = st.text_input("Quantity", get_val(3))
+    # 2. Smart Extraction Logic
+    def get_data(patterns, text_list):
+        # Look for labels and get the next item in the list
+        for i, word in enumerate(text_list):
+            clean_word = word.upper()
+            if any(p in clean_word for p in patterns):
+                if i + 1 < len(text_list):
+                    return text_list[i+1]
+        return ""
+
+    st.subheader("📝 Verification")
+    
+    # We look for your specific labels on the tag
+    col1, col2 = st.columns(2)
+    with col1:
+        f_book = st.text_input("Book No", get_data(["BOOK", "BK"], raw_text))
+        f_tag = st.text_input("Tag Sr No", get_data(["SR NO", "TAG"], raw_text))
+    with col2:
+        f_mat = st.text_input("Material No", get_data(["MATERIAL", "MAT NO"], raw_text))
+        f_qty = st.text_input("Quantity", get_data(["QUANTITY", "QTY"], raw_text))
+    
+    f_loc = st.text_input("Mat. Location", get_data(["LOCATION", "LOC"], raw_text))
+
+    # 3. Save Logic
+    if st.button("💾 SAVE TO EXCEL"):
+        new_row = {"Book No": f_book, "Tag Sr No": f_tag, "Material No": f_mat, "Quantity": f_qty, "Location": f_loc}
+        df = pd.DataFrame([new_row])
         
-        loc = st.text_input("Location", get_val(4))
+        filename = "inventory.xlsx"
+        if os.path.exists(filename):
+            old_df = pd.read_excel(filename)
+            df = pd.concat([old_df, df], ignore_index=True)
+        
+        df.to_excel(filename, index=False)
+        st.success(f"Tag {f_tag} saved! Total rows: {len(df)}")
 
-        if st.button("💾 SAVE TO EXCEL"):
-            new_data = {"Book": book_no, "Tag": tag_no, "Part": part_no, "Qty": qty, "Location": loc}
-            df = pd.DataFrame([new_data])
-            
-            filename = "inventory.xlsx"
-            if os.path.exists(filename):
-                old_df = pd.read_excel(filename)
-                df = pd.concat([old_df, df], ignore_index=True)
-            
-            df.to_excel(filename, index=False)
-            st.success("Successfully saved to Excel!")
+    # 4. Debugging (Hidden by default)
+    with st.expander("Show Raw Scanned Text (If data is missing)"):
+        st.write(raw_text)
 
-# Download button in sidebar
+# Download Sidebar
 if os.path.exists("inventory.xlsx"):
     with open("inventory.xlsx", "rb") as f:
-        st.sidebar.download_button("📥 Download Excel", f, file_name="Inventory.xlsx")
+        st.sidebar.download_button("📥 Download Excel", f, file_name="Inventory_Data.xlsx")
         
